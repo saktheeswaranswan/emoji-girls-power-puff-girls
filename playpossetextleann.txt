@@ -1,0 +1,325 @@
+let poseData = [];
+let poseMap = {};
+let mainVideo, video2;
+let poseTime = 0;
+let showPose = true;
+let scaleCycle = [1.0, 0.75, 0.5, 0.25];
+let scaleIndex = 0;
+let scaleFactor = scaleCycle[scaleIndex];
+let offsetX = 0, offsetY = 0;
+let isDragging = false, dragStartX, dragStartY;
+const fps = 30;
+let posePlaying = false;
+let posePlaybackRate = 1;
+let sliderMain, sliderSecond, speedInput;
+let volumeSlider;
+const skeletonEdges = [
+  [5, 7], [7, 9], [6, 8], [8, 10],
+  [11, 13], [13, 15], [12, 14], [14, 16],
+  [5, 6], [11, 12], [5, 11], [6, 12]
+];
+
+// 7 emoji "cute girls / barbie" set (will cycle fast)
+const headEmojis = ["👱‍♀️","💁‍♀️","👩‍🦰","👩‍🦱","👩‍🦳","👸","🧚‍♀️"];
+const crownEmoji = "👑";
+
+let loopPoseUntilVideoEnds = false; // toggle state
+
+function preload() {
+  poseData = loadJSON('puttiya.json');
+  mainVideo = createVideo(['yathaeeer.mp4']);
+  video2 = createVideo(['yathaeeer.mp4']);
+}
+
+function setup() {
+  createCanvas(1280, 920);
+  frameRate(fps);
+
+  mainVideo.hide();
+  video2.hide();
+
+  // Mute main video
+  mainVideo.volume(0);
+  mainVideo.elt.muted = true;
+  mainVideo.loop();
+
+  // Enable sound for second video
+  video2.volume(1);
+  video2.elt.muted = false;
+  video2.loop();
+
+  // Load pose data into map (works whether poseData is array or object)
+  (Array.isArray(poseData) ? poseData : Object.values(poseData)).forEach(entry => {
+    if (!poseMap[entry.frame_id]) poseMap[entry.frame_id] = [];
+    poseMap[entry.frame_id].push(entry.keypoints);
+  });
+
+  const yBase = height - 120;
+
+  // === MAIN VIDEO CONTROLS ===
+  createButton('Play Main').position(20, yBase).mousePressed(() => mainVideo.play());
+  createButton('Pause Main').position(100, yBase).mousePressed(() => mainVideo.pause());
+  createButton('Stop Main').position(180, yBase).mousePressed(() => { mainVideo.pause(); mainVideo.time(0); });
+  createButton('<< -10s Main').position(260, yBase).mousePressed(() => mainVideo.time(max(0, mainVideo.time() - 10)));
+  createButton('+10s Main').position(360, yBase).mousePressed(() => mainVideo.time(min(mainVideo.duration(), mainVideo.time() + 10)));
+
+  // === SECOND VIDEO CONTROLS ===
+  createButton('Play Second').position(620, yBase).mousePressed(() => video2.play());
+  createButton('Pause Second').position(720, yBase).mousePressed(() => video2.pause());
+  createButton('Stop Second').position(820, yBase).mousePressed(() => { video2.pause(); video2.time(0); });
+  createButton('<< -10s Second').position(920, yBase).mousePressed(() => video2.time(max(0, video2.time() - 10)));
+  createButton('+10s Second').position(1040, yBase).mousePressed(() => video2.time(min(video2.duration(), video2.time() + 10)));
+
+  // Load video durations and create sliders
+  mainVideo.elt.onloadedmetadata = () => {
+    sliderMain = createSlider(0, mainVideo.duration(), 0, 0.01)
+      .position(20, yBase + 30).style('width', '600px')
+      .input(() => mainVideo.time(sliderMain.value()));
+  };
+
+  video2.elt.onloadedmetadata = () => {
+    sliderSecond = createSlider(0, video2.duration(), 0, 0.01)
+      .position(660, yBase + 30).style('width', '600px')
+      .input(() => video2.time(sliderSecond.value()));
+  };
+
+  // === POSE CONTROLS ===
+  const poseY = yBase + 70;
+  createButton('Play Pose').position(20, poseY).mousePressed(() => {
+    posePlaying = true;
+    mainVideo.pause();
+  });
+  createButton('Pause Pose').position(100, poseY).mousePressed(() => posePlaying = false);
+  createButton('Stop Pose').position(180, poseY).mousePressed(() => {
+    posePlaying = false;
+    poseTime = 0;
+    mainVideo.pause();
+  });
+  createButton('<< -10s Pose').position(260, poseY).mousePressed(() => {
+    poseTime = max(poseTime - 10, 0);
+    mainVideo.pause();
+  });
+  createButton('+10s Pose').position(360, poseY).mousePressed(() => {
+    poseTime = min(poseTime + 10, mainVideo.duration());
+    mainVideo.pause();
+  });
+
+  // New toggle button for looping behavior
+  const loopToggle = createButton('Loop Pose Until Video Ends: OFF')
+    .position(460, poseY).mousePressed(() => {
+      loopPoseUntilVideoEnds = !loopPoseUntilVideoEnds;
+      loopToggle.html(`Loop Pose Until Video Ends: ${loopPoseUntilVideoEnds ? 'ON' : 'OFF'}`);
+    });
+
+  createSpan('Speed:').position(640, poseY + 5);
+  speedInput = createInput('1.0').position(700, poseY).size(40);
+  speedInput.input(() => {
+    const val = parseFloat(speedInput.value());
+    posePlaybackRate = isNaN(val) ? 1 : val;
+  });
+
+  // === VOLUME SLIDER FOR SECOND VIDEO ===
+  createSpan('🔊 Vol:').position(860, poseY + 5);
+  volumeSlider = createSlider(0, 1, 1, 0.01).position(910, poseY).style('width', '200px');
+}
+
+function draw() {
+  background(0);
+
+  if (mainVideo.elt.readyState >= 2) {
+    image(mainVideo, 0, 0, 640, 720);
+    if (sliderMain) sliderMain.value(mainVideo.time());
+  }
+
+  if (video2.elt.readyState >= 2) {
+    image(video2, 640, 0, 640, 720);
+    if (sliderSecond) sliderSecond.value(video2.time());
+    if (volumeSlider) video2.volume(volumeSlider.value());
+  }
+
+  // --- POSE TIMING: looping behaviour adjusted by loopPoseUntilVideoEnds ---
+  const dur = (mainVideo && typeof mainVideo.duration === 'function') ? mainVideo.duration() : 0;
+
+  if (posePlaying) {
+    poseTime += (deltaTime / 1000) * posePlaybackRate;
+
+    if (dur > 0) {
+      if (loopPoseUntilVideoEnds) {
+        if (!mainVideo.elt.loop) {
+          if (mainVideo.elt.readyState >= 2 && mainVideo.time() >= dur - 0.05) {
+            poseTime = dur;
+            posePlaying = false;
+          } else {
+            poseTime = poseTime % dur;
+            if (poseTime < 0) poseTime += dur;
+          }
+        } else {
+          poseTime = poseTime % dur;
+          if (poseTime < 0) poseTime += dur;
+        }
+      } else {
+        poseTime = poseTime % dur;
+        if (poseTime < 0) poseTime += dur;
+      }
+    }
+  } else if (!mainVideo.elt.paused) {
+    poseTime = mainVideo.time();
+  }
+
+  if (mainVideo.elt.paused) {
+    if (dur > 0) mainVideo.time(constrain(poseTime, 0, max(0.0001, dur)));
+    else mainVideo.time(poseTime);
+  }
+
+  if (showPose) drawPoseOverlay();
+}
+
+function drawPoseOverlay() {
+  const frameIndex = floor(poseTime * fps);
+  const persons = poseMap[frameIndex] || [];
+  const scaleX = 640 / (mainVideo.elt.videoWidth || 1);
+  const scaleY = 720 / (mainVideo.elt.videoHeight || 1);
+
+  // We'll collect head info to decide who is nearest to center (in screen coords)
+  let headsInfo = []; // {screenX, screenY, size}
+
+  push();
+  translate(offsetX, offsetY);
+  scale(scaleFactor);
+
+  // Draw keypoints (larger)
+  noStroke();
+  fill(255, 0, 0);
+  persons.forEach(kpts => {
+    kpts.forEach(p => {
+      if (p) circle(p[0] * scaleX, p[1] * scaleY, 30);
+    });
+  });
+
+  // Draw skeleton with a LEAN effect:
+  // apply a slight shearX to make edges appear slanted/lean, and make them thinner
+  push();
+  // shear only the skeleton drawing (keeps keypoints and emojis unskewed)
+  shearX(-0.12); // negative leans left; adjust magnitude to taste
+  stroke(255, 255, 0);
+  strokeWeight(4 / max(0.001, scaleFactor)); // lean = thinner
+  strokeCap(SQUARE); // crisp ends for the lean look
+  skeletonEdges.forEach(([i, j]) => {
+    persons.forEach(kpts => {
+      let a = kpts[i], b = kpts[j];
+      if (a && b) line(a[0] * scaleX, a[1] * scaleY, b[0] * scaleX, b[1] * scaleY);
+    });
+  });
+  pop();
+
+  // Draw cycling emojis on the head (BIGGER)
+  textAlign(CENTER, CENTER);
+  persons.forEach(kpts => {
+    let head = null;
+    if (kpts[0]) head = kpts[0]; // nose
+    else {
+      const leftEye = kpts[1], rightEye = kpts[2];
+      if (leftEye && rightEye) head = [(leftEye[0] + rightEye[0]) / 2, (leftEye[1] + rightEye[1]) / 2];
+      else if (leftEye) head = leftEye;
+      else if (rightEye) head = rightEye;
+    }
+
+    if (head) {
+      const emojiIndex = floor(poseTime * 100) % headEmojis.length;
+      const emoji = headEmojis[emojiIndex];
+
+      let size = 96 * scaleFactor;
+      const leftShoulder = kpts[5], rightShoulder = kpts[6];
+      if (leftShoulder && rightShoulder) {
+        const dx = (leftShoulder[0] - rightShoulder[0]) * 0.5 * scaleX;
+        const dy = (leftShoulder[1] - rightShoulder[1]) * 0.5 * scaleY;
+        const shoulderDist = sqrt(dx*dx + dy*dy);
+        size = constrain(shoulderDist * 2.4, 48, 260);
+      } else {
+        size = max(size, 96);
+      }
+
+      textSize(size);
+      fill(0, 180);
+      text(emoji, head[0] * scaleX + 4, head[1] * scaleY + 4);
+      fill(255);
+      text(emoji, head[0] * scaleX, head[1] * scaleY);
+
+      const screenX = offsetX + head[0] * scaleX * scaleFactor;
+      const screenY = offsetY + head[1] * scaleY * scaleFactor;
+      const screenSize = size * scaleFactor;
+      headsInfo.push({ screenX, screenY, screenSize });
+    }
+  });
+
+  pop();
+
+  // Decide who is nearest to center of LEFT video (left video center = 320)
+  const leftVideoCenterX = 320;
+  const centerThreshold = 120;
+
+  if (headsInfo.length > 0) {
+    let best = null;
+    let bestDist = Infinity;
+    headsInfo.forEach(h => {
+      if (h.screenX >= 0 && h.screenX <= 640) {
+        const d = abs(h.screenX - leftVideoCenterX);
+        if (d < bestDist) {
+          bestDist = d;
+          best = h;
+        }
+      }
+    });
+
+    if (best && bestDist <= centerThreshold) {
+      const crownSize = constrain(best.screenSize * 0.6, 24, 180);
+      const crownX = best.screenX;
+      const crownY = best.screenY - (best.screenSize * 0.9);
+
+      push();
+      textAlign(CENTER, CENTER);
+      textSize(crownSize);
+      fill(0, 180);
+      text(crownEmoji, crownX + 4, crownY + 4);
+      fill(255, 215, 0);
+      text(crownEmoji, crownX, crownY);
+      pop();
+    }
+  }
+}
+
+function mousePressed() {
+  if (showPose) {
+    isDragging = true;
+    dragStartX = mouseX - offsetX;
+    dragStartY = mouseY - offsetY;
+  }
+}
+
+function mouseDragged() {
+  if (isDragging) {
+    offsetX = mouseX - dragStartX;
+    offsetY = mouseY - dragStartY;
+  }
+}
+
+function mouseReleased() {
+  isDragging = false;
+}
+
+function keyPressed() {
+  const k = key.toUpperCase();
+  if (k === 'T') {
+    showPose = !showPose;
+  } else if (k === 'B') {
+    scaleIndex = (scaleIndex + 1) % scaleCycle.length;
+    scaleFactor = scaleCycle[scaleIndex];
+    console.log(`Pose Scale: ${scaleFactor}`);
+  } else if (k === 'F') {
+    poseTime = min(poseTime + 10, mainVideo.duration());
+    mainVideo.pause();
+  } else if (k === 'R') {
+    poseTime = max(poseTime - 10, 0);
+    mainVideo.pause();
+  }
+}
